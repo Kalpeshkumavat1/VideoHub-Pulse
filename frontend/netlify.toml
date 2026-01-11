@@ -1,5 +1,4 @@
 [build]
-  base = "frontend"
   command = "pnpm install && pnpm build"
   publish = "dist"
 
@@ -7,6 +6,7 @@
   NODE_VERSION = "18"
 
 [functions]
+  directory = "netlify/functions"
   external_node_modules = ["express"]
   node_bundler = "esbuild"
 
