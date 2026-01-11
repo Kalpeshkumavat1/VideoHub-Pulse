@@ -1,8 +1,10 @@
 [build]
-  command = "npm run build:client"
-  functions = "netlify/functions"
-  publish = "dist/spa"
+  base = "frontend"
+  command = "pnpm install && pnpm build"
+  publish = "dist"
 
+[build.environment]
+  NODE_VERSION = "18"
 
 [functions]
   external_node_modules = ["express"]
