@@ -38,6 +38,9 @@ connectDB();
 
 connectRedis();
 
+// Trust proxy - required when behind reverse proxy (e.g., Render, Heroku, etc.)
+app.set('trust proxy', true);
+
 app.use(helmet());
 app.use(compression());
 app.use(cors({
