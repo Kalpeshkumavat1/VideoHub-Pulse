@@ -28,7 +28,7 @@ const io = new Server(server, {
       ? process.env.SOCKET_IO_CORS_ORIGIN.split(',')
       : process.env.CORS_ORIGIN
         ? process.env.CORS_ORIGIN.split(',')
-        : ['http://localhost:5173', 'http://localhost:3000'],
+        : ['http://localhost:5173', 'http://localhost:3000','https://videohub-pulse.netlify.app'],
     methods: ['GET', 'POST'],
     credentials: true
   }
@@ -43,7 +43,7 @@ app.use(compression());
 app.use(cors({
   origin: process.env.CORS_ORIGIN 
     ? process.env.CORS_ORIGIN.split(',')
-    : ['http://localhost:5173', 'http://localhost:3000'],
+    : ['http://localhost:5173', 'http://localhost:3000','https://videohub-pulse.netlify.app'],
   credentials: true
 }));
 app.use(express.json({ limit: '10mb' }));
