@@ -4,12 +4,22 @@ import { getRedisClient } from '../config/redis.js';
 const createRateLimiter = (windowMs, max) => {
   const redisClient = getRedisClient();
   
+  const baseConfig = {
+    windowMs: windowMs,
+    max: max,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: 'Too many requests from this IP, please try again later',
+    // Disable trust proxy validation since we're behind a trusted proxy (Render)
+    // We set trust proxy to 1 in server.js to only trust the first proxy
+    validate: {
+      trustProxy: false
+    }
+  };
+  
   if (redisClient) {
     return rateLimit({
-      windowMs: windowMs,
-      max: max,
-      standardHeaders: true,
-      legacyHeaders: false,
+      ...baseConfig,
       store: {
         async incr(key, cb) {
           try {
@@ -28,17 +38,10 @@ const createRateLimiter = (windowMs, max) => {
         async resetKey(key) {
           await redisClient.del(key);
         }
-      },
-      message: 'Too many requests from this IP, please try again later'
+      }
     });
   } else {
-    return rateLimit({
-      windowMs: windowMs,
-      max: max,
-      standardHeaders: true,
-      legacyHeaders: false,
-      message: 'Too many requests from this IP, please try again later'
-    });
+    return rateLimit(baseConfig);
   }
 };
 
