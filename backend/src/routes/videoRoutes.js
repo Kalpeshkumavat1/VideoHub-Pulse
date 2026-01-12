@@ -15,14 +15,14 @@ import {
   canAccessVideo, 
   canModifyVideo 
 } from '../middleware/rbacMiddleware.js';
-import { upload } from '../middleware/uploadMiddleware.js';
+import { upload, handleUploadError } from '../middleware/uploadMiddleware.js';
 import { uploadRateLimiter } from '../middleware/rateLimiter.js';
 
 const router = express.Router();
 
 router.use(protect);
 
-router.post('/upload', canUploadVideo, uploadRateLimiter, upload.single('video'), uploadVideo);
+router.post('/upload', canUploadVideo, uploadRateLimiter, upload.single('video'), handleUploadError, uploadVideo);
 
 router.get('/', getVideos);
 

@@ -31,9 +31,23 @@ const videoSchema = new mongoose.Schema({
     type: String,
     required: true
   },
+  // Cloudinary URLs (primary storage)
+  cloudinaryUrl: {
+    type: String,
+    default: null
+  },
+  cloudinaryPublicId: {
+    type: String,
+    default: null
+  },
+  thumbnailUrl: {
+    type: String,
+    default: null
+  },
+  // Legacy fields (for backward compatibility, deprecated)
   uploadPath: {
     type: String,
-    required: true
+    default: null
   },
   processedPath: {
     type: String,

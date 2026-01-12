@@ -37,6 +37,8 @@ export interface Video {
   status: 'uploading' | 'uploaded' | 'processing' | 'analyzing' | 'completed' | 'failed';
   thumbnail?: string;
   thumbnailPath?: string;
+  thumbnailUrl?: string; // Cloudinary thumbnail URL
+  cloudinaryUrl?: string; // Cloudinary video URL (primary)
   duration?: number;
   views: number;
   organization: string;

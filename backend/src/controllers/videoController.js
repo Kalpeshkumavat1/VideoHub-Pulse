@@ -1,13 +1,7 @@
 import Video from '../models/Video.js';
-import { addVideoToQueue } from '../services/videoProcessingService.js';
 import { io } from '../server.js';
-import fs from 'fs';
-import path from 'path';
-import ffmpeg from 'fluent-ffmpeg';
-import ffmpegStatic from 'ffmpeg-static';
-import sharp from 'sharp';
-
-ffmpeg.setFfmpegPath(ffmpegStatic);
+import cloudinary from '../config/cloudinary.js';
+import { Readable } from 'stream';
 
 export const uploadVideo = async (req, res) => {
   try {
@@ -20,17 +14,21 @@ export const uploadVideo = async (req, res) => {
 
     const { title, description, tags, privacy, sensitivityLevel, category, customCategories } = req.body;
 
-    // Ensure uploadPath is an absolute path string
-    const uploadPath = path.resolve(req.file.path);
+    // Validate organization exists and is populated
+    if (!req.user.organization) {
+      return res.status(400).json({
+        success: false,
+        message: 'User organization not found'
+      });
+    }
+
+    // Get organization (handle both populated and ObjectId cases)
+    const org = req.user.organization;
+    const orgId = org._id || org;
 
     // Validate file size against organization limits
-    const org = req.user.organization;
     const maxFileSize = org.settings?.maxVideoSize || 10 * 1024 * 1024 * 1024; // 10GB default
     if (req.file.size > maxFileSize) {
-      // Clean up uploaded file
-      if (fs.existsSync(uploadPath)) {
-        fs.unlinkSync(uploadPath);
-      }
       return res.status(400).json({
         success: false,
         message: `File size exceeds organization limit of ${(maxFileSize / (1024 * 1024 * 1024)).toFixed(2)}GB`
@@ -38,65 +36,138 @@ export const uploadVideo = async (req, res) => {
     }
 
     // Validate file format against organization allowed formats
-    const fileExt = path.extname(req.file.originalname).toLowerCase().slice(1);
+    const fileExt = req.file.originalname.split('.').pop()?.toLowerCase();
     const allowedFormats = org.settings?.allowedVideoFormats || ['mp4', 'avi', 'mov', 'mkv', 'webm'];
     if (!allowedFormats.includes(fileExt)) {
-      // Clean up uploaded file
-      if (fs.existsSync(uploadPath)) {
-        fs.unlinkSync(uploadPath);
-      }
       return res.status(400).json({
         success: false,
         message: `File format .${fileExt} is not allowed. Allowed formats: ${allowedFormats.join(', ')}`
       });
     }
 
-    // Create video record
-    const video = await Video.create({
-      title: title || req.file.originalname,
-      description: description || '',
-      filename: req.file.filename,
-      originalFilename: req.file.originalname,
-      fileSize: req.file.size,
-      mimeType: req.file.mimetype,
-      uploadPath: uploadPath, // Store as absolute path string
-      uploader: req.user._id,
-      organization: req.user.organization._id,
-      privacy: privacy || 'private',
-      tags: tags ? tags.split(',').map(tag => tag.trim()) : [],
-      category: category || 'uncategorized',
-      customCategories: customCategories ? customCategories.split(',').map(cat => cat.trim()) : [],
-      sensitivityLevel: sensitivityLevel || 'low',
-      status: 'uploaded'
-    });
+    // Upload to Cloudinary
+    console.log('Uploading video to Cloudinary...');
+    
+    // Convert buffer to stream for Cloudinary
+    const stream = cloudinary.uploader.upload_stream(
+      {
+        resource_type: 'video',
+        folder: `videos/${orgId}`,
+        public_id: `${req.user._id}_${Date.now()}`,
+        chunk_size: 6000000, // 6MB chunks for large files
+        eager: [
+          { width: 480, height: 270, crop: 'limit', quality: 'auto' },
+          { width: 720, height: 405, crop: 'limit', quality: 'auto' },
+          { width: 1080, height: 608, crop: 'limit', quality: 'auto' }
+        ],
+        eager_async: true,
+      },
+      async (error, result) => {
+        if (error) {
+          console.error('Cloudinary upload error:', error);
+          return res.status(500).json({
+            success: false,
+            message: 'Error uploading video to Cloudinary: ' + error.message
+          });
+        }
 
-    // Emit upload complete event
-    io.to(req.user._id.toString()).emit('video:uploaded', {
-      videoId: video._id,
-      status: 'uploaded'
-    });
+        try {
+          // Extract video metadata from Cloudinary response
+          const duration = result.duration || 0;
+          const width = result.width || 0;
+          const height = result.height || 0;
+          const format = result.format || 'mp4';
+          
+          // Generate thumbnail URL using Cloudinary transformation
+          const thumbnailUrl = cloudinary.url(result.public_id, {
+            resource_type: 'video',
+            transformation: [
+              { width: 320, height: 240, crop: 'fill', quality: 'auto' }
+            ],
+            format: 'jpg'
+          });
 
-    // Add to processing queue
-    await addVideoToQueue(video._id.toString());
+          // Create video record with Cloudinary URL
+          const video = await Video.create({
+            title: title || req.file.originalname,
+            description: description || '',
+            filename: result.public_id,
+            originalFilename: req.file.originalname,
+            fileSize: req.file.size,
+            mimeType: req.file.mimetype,
+            cloudinaryUrl: result.secure_url,
+            cloudinaryPublicId: result.public_id,
+            uploader: req.user._id,
+            organization: orgId,
+            privacy: privacy || 'private',
+            tags: tags ? tags.split(',').map(tag => tag.trim()) : [],
+            category: category || 'uncategorized',
+            customCategories: customCategories ? customCategories.split(',').map(cat => cat.trim()) : [],
+            sensitivityLevel: sensitivityLevel || 'low',
+            status: 'completed', // Cloudinary handles processing
+            duration: Math.floor(duration),
+            thumbnailUrl: thumbnailUrl,
+            metadata: {
+              width: width,
+              height: height,
+              format: format
+            }
+          });
 
-    res.status(201).json({
-      success: true,
-      video: {
-        id: video._id,
-        title: video.title,
-        status: video.status,
-        uploadProgress: 100
+          // Emit upload complete event
+          try {
+            io.to(req.user._id.toString()).emit('video:uploaded', {
+              videoId: video._id,
+              status: 'completed',
+              cloudinaryUrl: result.secure_url
+            });
+          } catch (socketError) {
+            console.error('Socket emit error:', socketError);
+          }
+
+          res.status(201).json({
+            success: true,
+            video: {
+              id: video._id,
+              title: video.title,
+              status: video.status,
+              cloudinaryUrl: result.secure_url,
+              thumbnailUrl: thumbnailUrl
+            }
+          });
+        } catch (dbError) {
+          console.error('Database error:', dbError);
+          // Try to delete from Cloudinary if DB save fails
+          try {
+            await cloudinary.uploader.destroy(result.public_id, { resource_type: 'video' });
+          } catch (deleteError) {
+            console.error('Error deleting from Cloudinary:', deleteError);
+          }
+          
+          res.status(500).json({
+            success: false,
+            message: 'Error saving video record: ' + dbError.message
+          });
+        }
       }
-    });
+    );
+
+    // Pipe the file buffer to Cloudinary
+    const bufferStream = new Readable();
+    bufferStream.push(req.file.buffer);
+    bufferStream.push(null);
+    bufferStream.pipe(stream);
+
   } catch (error) {
-    // Clean up uploaded file if video creation failed
-    if (req.file && fs.existsSync(req.file.path)) {
-      fs.unlinkSync(req.file.path);
-    }
+    // Log the actual error for debugging
+    console.error('Video upload error:', error);
+    console.error('Error stack:', error.stack);
 
     res.status(500).json({
       success: false,
-      message: 'Error uploading video'
+      message: process.env.NODE_ENV === 'production' 
+        ? 'Error uploading video. Please try again.' 
+        : `Error uploading video: ${error.message}`
     });
   }
 };
@@ -245,7 +316,7 @@ export const getVideos = async (req, res) => {
       .sort(sort)
       .limit(limit * 1)
       .skip((page - 1) * limit)
-      .select('-uploadPath -processedPath');
+      .select('-uploadPath -processedPath -cloudinaryPublicId');
 
     const total = await Video.countDocuments(query);
 
@@ -324,7 +395,7 @@ export const getProcessingStatus = async (req, res) => {
   }
 };
 
-// @desc    Stream video
+// @desc    Get video stream URL (Cloudinary)
 // @route   GET /api/videos/:id/stream
 // @access  Private
 export const streamVideo = async (req, res) => {
@@ -346,8 +417,6 @@ export const streamVideo = async (req, res) => {
       });
     }
 
-    // Allow streaming if video is uploaded (even if not fully processed)
-    // This allows users to watch videos while they're being processed
     if (video.status === 'failed') {
       return res.status(400).json({
         success: false,
@@ -355,51 +424,79 @@ export const streamVideo = async (req, res) => {
       });
     }
 
-    // Determine which quality to stream
-    const quality = req.query.quality || '720';
-    const videoPath = video.qualities.get(quality) || video.processedPath || video.uploadPath;
+    // Use Cloudinary URL if available
+    if (video.cloudinaryUrl) {
+      // Increment view count
+      video.views += 1;
+      await video.save({ validateBeforeSave: false });
 
-    if (!fs.existsSync(videoPath)) {
-      return res.status(404).json({
-        success: false,
-        message: 'Video file not found'
-      });
+      // Get quality parameter (Cloudinary supports quality transformations)
+      const quality = req.query.quality || 'auto';
+      
+      // Build Cloudinary URL with quality transformation
+      let videoUrl = video.cloudinaryUrl;
+      
+      if (quality !== 'auto' && video.cloudinaryPublicId) {
+        // Apply quality transformation using Cloudinary
+        const height = quality === '480' ? 270 : quality === '720' ? 405 : quality === '1080' ? 608 : 'auto';
+        videoUrl = cloudinary.url(video.cloudinaryPublicId, {
+          resource_type: 'video',
+          transformation: [
+            { height: height, crop: 'limit', quality: 'auto' }
+          ]
+        });
+      }
+
+      // Redirect to Cloudinary URL (Cloudinary handles streaming)
+      return res.redirect(videoUrl);
     }
 
-    // Get file stats
-    const stat = fs.statSync(videoPath);
-    const fileSize = stat.size;
-    const range = req.headers.range;
+    // Fallback to legacy local file streaming (for backward compatibility)
+    if (video.uploadPath) {
+      const fs = await import('fs');
+      const path = await import('path');
+      
+      const videoPath = path.resolve(video.uploadPath);
+      if (fs.existsSync(videoPath)) {
+        const stat = fs.statSync(videoPath);
+        const fileSize = stat.size;
+        const range = req.headers.range;
 
-    if (range) {
-      // Partial content (streaming)
-      const parts = range.replace(/bytes=/, '').split('-');
-      const start = parseInt(parts[0], 10);
-      const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-      const chunksize = (end - start) + 1;
-      const file = fs.createReadStream(videoPath, { start, end });
-      const head = {
-        'Content-Range': `bytes ${start}-${end}/${fileSize}`,
-        'Accept-Ranges': 'bytes',
-        'Content-Length': chunksize,
-        'Content-Type': 'video/mp4',
-      };
-      res.writeHead(206, head);
-      file.pipe(res);
-    } else {
-      // Full content
-      const head = {
-        'Content-Length': fileSize,
-        'Content-Type': 'video/mp4',
-      };
-      res.writeHead(200, head);
-      fs.createReadStream(videoPath).pipe(res);
+        if (range) {
+          const parts = range.replace(/bytes=/, '').split('-');
+          const start = parseInt(parts[0], 10);
+          const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+          const chunksize = (end - start) + 1;
+          const file = fs.createReadStream(videoPath, { start, end });
+          const head = {
+            'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+            'Accept-Ranges': 'bytes',
+            'Content-Length': chunksize,
+            'Content-Type': 'video/mp4',
+          };
+          res.writeHead(206, head);
+          file.pipe(res);
+        } else {
+          const head = {
+            'Content-Length': fileSize,
+            'Content-Type': 'video/mp4',
+          };
+          res.writeHead(200, head);
+          fs.createReadStream(videoPath).pipe(res);
+        }
+
+        video.views += 1;
+        await video.save({ validateBeforeSave: false });
+        return;
+      }
     }
 
-    // Increment view count
-    video.views += 1;
-    await video.save({ validateBeforeSave: false });
+    return res.status(404).json({
+      success: false,
+      message: 'Video file not found'
+    });
   } catch (error) {
+    console.error('Stream video error:', error);
     res.status(500).json({
       success: false,
       message: 'Error streaming video'
@@ -407,7 +504,7 @@ export const streamVideo = async (req, res) => {
   }
 };
 
-// @desc    Get thumbnail
+// @desc    Get thumbnail URL
 // @route   GET /api/videos/:id/thumbnail
 // @access  Private
 export const getVideoThumbnail = async (req, res) => {
@@ -421,15 +518,39 @@ export const getVideoThumbnail = async (req, res) => {
       });
     }
 
-    if (!video.thumbnailPath || !fs.existsSync(video.thumbnailPath)) {
-      return res.status(404).json({
-        success: false,
-        message: 'Thumbnail not found'
-      });
+    // Use Cloudinary thumbnail URL if available
+    if (video.thumbnailUrl) {
+      return res.redirect(video.thumbnailUrl);
     }
 
-    res.sendFile(path.resolve(video.thumbnailPath));
+    // Generate thumbnail URL from Cloudinary if we have public ID
+    if (video.cloudinaryPublicId) {
+      const thumbnailUrl = cloudinary.url(video.cloudinaryPublicId, {
+        resource_type: 'video',
+        transformation: [
+          { width: 320, height: 240, crop: 'fill', quality: 'auto' }
+        ],
+        format: 'jpg'
+      });
+      return res.redirect(thumbnailUrl);
+    }
+
+    // Fallback to legacy local thumbnail
+    if (video.thumbnailPath) {
+      const fs = await import('fs');
+      const path = await import('path');
+      
+      if (fs.existsSync(video.thumbnailPath)) {
+        return res.sendFile(path.resolve(video.thumbnailPath));
+      }
+    }
+
+    return res.status(404).json({
+      success: false,
+      message: 'Thumbnail not found'
+    });
   } catch (error) {
+    console.error('Get thumbnail error:', error);
     res.status(500).json({
       success: false,
       message: 'Error fetching thumbnail'
@@ -492,11 +613,21 @@ export const deleteVideo = async (req, res) => {
       });
     }
 
-    // Permissions are already checked by canModifyVideo middleware
-    // If we reach here, user has permission to modify the video
-    // No need to re-check permissions
+    // Delete from Cloudinary if cloudinaryPublicId exists
+    if (video.cloudinaryPublicId) {
+      try {
+        await cloudinary.uploader.destroy(video.cloudinaryPublicId, {
+          resource_type: 'video',
+          invalidate: true
+        });
+        console.log(`Deleted video from Cloudinary: ${video.cloudinaryPublicId}`);
+      } catch (cloudinaryError) {
+        console.error('Error deleting from Cloudinary:', cloudinaryError);
+        // Continue with soft delete even if Cloudinary deletion fails
+      }
+    }
 
-    // Soft delete
+    // Soft delete in database
     video.deletedAt = new Date();
     await video.save();
 
@@ -505,6 +636,7 @@ export const deleteVideo = async (req, res) => {
       message: 'Video deleted successfully'
     });
   } catch (error) {
+    console.error('Delete video error:', error);
     res.status(500).json({
       success: false,
       message: 'Error deleting video'

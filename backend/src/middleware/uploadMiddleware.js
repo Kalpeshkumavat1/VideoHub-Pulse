@@ -1,26 +1,8 @@
 import multer from 'multer';
-import path from 'path';
-import { v4 as uuidv4 } from 'uuid';
-import fs from 'fs';
 
-const uploadDir = process.env.UPLOAD_PATH || './uploads';
-const thumbnailDir = process.env.THUMBNAIL_PATH || './thumbnails';
-
-[uploadDir, thumbnailDir].forEach(dir => {
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-});
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, uploadDir);
-  },
-  filename: (req, file, cb) => {
-    const uniqueName = `${uuidv4()}${path.extname(file.originalname)}`;
-    cb(null, uniqueName);
-  }
-});
+// Use memory storage for Cloudinary uploads
+// Files will be stored in memory and then uploaded to Cloudinary
+const storage = multer.memoryStorage();
 
 const fileFilter = (req, file, cb) => {
   const allowedMimes = [
@@ -48,22 +30,50 @@ export const upload = multer({
 });
 
 export const handleUploadError = (err, req, res, next) => {
+  // Log error for debugging
+  console.error('Upload error:', err);
+  
   if (err instanceof multer.MulterError) {
     if (err.code === 'LIMIT_FILE_SIZE') {
       return res.status(400).json({
         success: false,
-        message: 'File too large. Maximum size is 10GB'
+        message: `File too large. Maximum size is ${(parseInt(process.env.MAX_FILE_SIZE) || 10 * 1024 * 1024 * 1024) / (1024 * 1024 * 1024)}GB`
       });
     }
     if (err.code === 'LIMIT_UNEXPECTED_FILE') {
       return res.status(400).json({
         success: false,
-        message: 'Unexpected file field'
+        message: 'Unexpected file field. Expected field name: "video"'
       });
     }
+    if (err.code === 'LIMIT_PART_COUNT') {
+      return res.status(400).json({
+        success: false,
+        message: 'Too many parts in the multipart request'
+      });
+    }
+    if (err.code === 'LIMIT_FIELD_COUNT') {
+      return res.status(400).json({
+        success: false,
+        message: 'Too many fields in the form'
+      });
+    }
+    
+    return res.status(400).json({
+      success: false,
+      message: `Upload error: ${err.message || err.code}`
+    });
   }
 
   if (err) {
+    // Handle custom errors (like file type validation)
+    if (err.message && err.message.includes('Invalid file type')) {
+      return res.status(400).json({
+        success: false,
+        message: err.message
+      });
+    }
+    
     return res.status(400).json({
       success: false,
       message: err.message || 'Upload failed'

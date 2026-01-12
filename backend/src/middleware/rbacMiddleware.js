@@ -180,22 +180,46 @@ export const canModifyVideo = async (req, res, next) => {
   }
 };
 
-export const canUploadVideo = (req, res, next) => {
-  if (!req.user) {
-    return res.status(401).json({
+export const canUploadVideo = async (req, res, next) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+
+    if (req.user.role === 'viewer') {
+      return res.status(403).json({
+        success: false,
+        message: 'Viewers do not have permission to upload videos'
+      });
+    }
+
+    // Ensure organization is populated
+    if (!req.user.organization) {
+      // Try to populate if not already populated
+      const User = (await import('../models/User.js')).default;
+      const user = await User.findById(req.user._id).populate('organization');
+      
+      if (!user || !user.organization) {
+        return res.status(400).json({
+          success: false,
+          message: 'User organization not found. Please contact administrator.'
+        });
+      }
+      
+      req.user.organization = user.organization;
+    }
+
+    next();
+  } catch (error) {
+    console.error('canUploadVideo error:', error);
+    return res.status(500).json({
       success: false,
-      message: 'Authentication required'
+      message: 'Error checking upload permissions'
     });
   }
-
-  if (req.user.role === 'viewer') {
-    return res.status(403).json({
-      success: false,
-      message: 'Viewers do not have permission to upload videos'
-    });
-  }
-
-  next();
 };
 
 export const canManageUsers = (req, res, next) => {

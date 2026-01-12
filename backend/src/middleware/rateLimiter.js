@@ -1,8 +1,13 @@
 import rateLimit from 'express-rate-limit';
 import { getRedisClient } from '../config/redis.js';
 
-const createRateLimiter = (windowMs, max) => {
+const createRateLimiter = (windowMs, max, skipSuccessfulRequests = false) => {
   const redisClient = getRedisClient();
+  
+  // In development, allow bypassing rate limit if DISABLE_RATE_LIMIT is set
+  if (process.env.NODE_ENV !== 'production' && process.env.DISABLE_RATE_LIMIT === 'true') {
+    return (req, res, next) => next(); // Skip rate limiting
+  }
   
   const baseConfig = {
     windowMs: windowMs,
@@ -10,6 +15,7 @@ const createRateLimiter = (windowMs, max) => {
     standardHeaders: true,
     legacyHeaders: false,
     message: 'Too many requests from this IP, please try again later',
+    skipSuccessfulRequests: skipSuccessfulRequests,
     // Disable trust proxy validation since we're behind a trusted proxy (Render)
     // We set trust proxy to 1 in server.js to only trust the first proxy
     validate: {
@@ -50,7 +56,10 @@ const rateLimiter = createRateLimiter(
   parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 100
 );
 
-export const authRateLimiter = createRateLimiter(15 * 60 * 1000, 5);
+// Auth rate limiter - more lenient in development
+const authWindowMs = parseInt(process.env.AUTH_RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000; // 15 minutes
+const authMaxRequests = parseInt(process.env.AUTH_RATE_LIMIT_MAX) || (process.env.NODE_ENV === 'production' ? 5 : 20);
+export const authRateLimiter = createRateLimiter(authWindowMs, authMaxRequests);
 
 export const uploadRateLimiter = createRateLimiter(60 * 60 * 1000, 10);
 
